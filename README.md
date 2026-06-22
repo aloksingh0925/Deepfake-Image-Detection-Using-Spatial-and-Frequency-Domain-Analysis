@@ -1,0 +1,2 @@
+# Deepfake-Image-Detection-Using-Spatial-and-Frequency-Domain-Analysis
+Developed an AI-based Deepfake Image Detection System using FFT and DCT for spatial and frequency domain analysis. Built and trained CNN/deep learning models to classify real and fake images accurately. Performed image preprocessing, feature extraction, and model evaluation to improve performance and robustness against advanced deepfake techniques.
