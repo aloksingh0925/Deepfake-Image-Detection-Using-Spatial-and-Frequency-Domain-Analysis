@@ -1,0 +1,85 @@
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../generated/prisma"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ================== AUTH MODELS ==================
+
+model User {
+  id         String         @id @default(auto()) @map("_id") @db.ObjectId
+  email      String         @unique
+  name       String?
+  createdAt  DateTime       @default(now())
+  identities UserIdentity[]
+  isDeleted  Boolean?       @default(false)
+}
+
+model UserIdentity {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String   @db.ObjectId
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider   String
+  providerId String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  isDeleted  Boolean? @default(false)
+
+  @@unique([provider, providerId])
+}
+
+// ================== OTP MODEL ==================
+
+model Otp {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  identifier String
+  type       String
+  otp        String
+  expiresAt  DateTime
+  attempts   Int      @default(0)
+  verified   Boolean  @default(false)
+  purpose    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  isDeleted  Boolean? @default(false)
+
+  @@index([identifier, type])
+  @@index([expiresAt])
+  @@index([identifier, type, verified])
+}
+
+// ================== PREDICTION MODEL ==================
+
+model Prediction {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  modelName   String
+  prediction  String
+  score       Float
+  confidence  Float
+  mediaUrl    String?
+  mediaType   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  isDeleted   Boolean  @default(false)
+
+  @@index([modelName])
+  @@index([prediction])
+}
+
+// ================== CONTACT MODEL ==================
+
+model Contact {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  email     String
+  message   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  isDeleted Boolean  @default(false)
+}

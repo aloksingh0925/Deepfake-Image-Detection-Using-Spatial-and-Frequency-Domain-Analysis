@@ -1,0 +1,366 @@
+================================================================================
+CELL 17
+================================================================================
+# ─── MesoNet: Designed specifically for deepfake detection ────────────────────
+# Paper: Afchar et al., 2018 — "MesoNet: a Compact Facial Video Forgery Detection Network"
+# Key idea: Targets mesoscopic features (between pixel-level and semantic-level)
+
+class Meso4(nn.Module):
+    """Original MesoNet-4 architecture."""
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1
+            nn.Conv2d(3, 8, 3, padding=1), nn.ReLU(),
+            nn.BatchNorm2d(8), nn.MaxPool2d(2, 2),
+            # Block 2
+            nn.Conv2d(8, 8, 5, padding=2), nn.ReLU(),
+            nn.BatchNorm2d(8), nn.MaxPool2d(2, 2),
+            # Block 3
+            nn.Conv2d(8, 16, 5, padding=2), nn.ReLU(),
+            nn.BatchNorm2d(16), nn.MaxPool2d(2, 2),
+            # Block 4
+            nn.Conv2d(16, 16, 5, padding=2), nn.ReLU(),
+            nn.BatchNorm2d(16), nn.MaxPool2d(4, 4),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.5),
+            nn.Linear(16 * 7 * 7, 16),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.5),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+class InceptionBlock(nn.Module):
+    """Inception block for MesoInception4."""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.b1 = nn.Conv2d(in_ch, out_ch // 4, 1)
+        self.b2 = nn.Sequential(nn.Conv2d(in_ch, out_ch // 4, 1),
+                                 nn.Conv2d(out_ch // 4, out_ch // 4, 3, padding=1))
+        self.b3 = nn.Sequential(nn.Conv2d(in_ch, out_ch // 4, 1),
+                                 nn.Conv2d(out_ch // 4, out_ch // 4, 5, padding=2))
+        self.b4 = nn.Sequential(nn.MaxPool2d(3, stride=1, padding=1),
+                                 nn.Conv2d(in_ch, out_ch // 4, 1))
+        self.norm = nn.BatchNorm2d(out_ch)
+
+    def forward(self, x):
+        return F.relu(self.norm(torch.cat([self.b1(x), self.b2(x),
+                                           self.b3(x), self.b4(x)], dim=1)))
+
+
+class MesoInception4(nn.Module):
+    """MesoInception4 — uses Inception blocks for richer multi-scale features."""
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            InceptionBlock(3, 8), nn.MaxPool2d(2, 2),
+            InceptionBlock(8, 8), nn.MaxPool2d(4, 4),
+            nn.Conv2d(8, 16, 5, padding=2), nn.ReLU(),
+            nn.BatchNorm2d(16), nn.MaxPool2d(2, 2),
+            nn.Conv2d(16, 16, 5, padding=2), nn.ReLU(),
+            nn.BatchNorm2d(16), nn.MaxPool2d(4, 4),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.5),
+            nn.Linear(16 * 3 * 3, 16),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.5),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# Test
+dummy = torch.randn(2, 3, 224, 224).to(CFG.DEVICE)
+m4  = Meso4().to(CFG.DEVICE)
+mi4 = MesoInception4().to(CFG.DEVICE)
+print(f'✅ Meso4         output shape: {m4(dummy).shape}')
+print(f'✅ MesoInception4 output shape: {mi4(dummy).shape}')
+print(f'   Meso4 params: {sum(p.numel() for p in m4.parameters()):,}')
+
+================================================================================
+CELL 22
+================================================================================
+# ─── XceptionNet: State-of-the-art for FaceForensics++ ───────────────────────
+# Paper: Chollet, 2017 — "Xception: Deep Learning with Depthwise Separable Convolutions"
+# Used in FaceForensics++: Rössler et al., 2019 — "FaceForensics++: Learning to Detect Manipulated Facial Images"
+
+class XceptionDetector(nn.Module):
+    def __init__(self, num_classes=1, pretrained=True):
+        super().__init__()
+        # Load pre-trained Xception from timm library
+        self.backbone = timm.create_model('xception', pretrained=pretrained, num_classes=0)
+
+        # Modify the classifier for binary classification
+        # Xception's original classifier has an input feature of 2048
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(self.backbone.num_features, num_classes),
+            nn.Sigmoid() # For binary classification outputting probabilities
+        )
+
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.classifier(features).squeeze(1)
+
+# Test XceptionDetector
+dummy = torch.randn(2, 3, CFG.IMG_SIZE, CFG.IMG_SIZE).to(CFG.DEVICE)
+xcept_model = XceptionDetector().to(CFG.DEVICE)
+print(f'✅ XceptionDetector output shape: {xcept_model(dummy).shape}')
+print(f'   XceptionDetector params: {sum(p.numel() for p in xcept_model.parameters()):,}')
+
+================================================================================
+CELL 26
+================================================================================
+# ─── EfficientNet-B4 ──────────────────────────────────────────────────────────
+# Paper: Tan & Le, 2019 — EfficientNet: Rethinking Model Scaling
+# DFDC winner backbone — compound scaling balances width/depth/resolution
+
+class EfficientNetDetector(nn.Module):
+    def __init__(self, version='efficientnet_b4', pretrained=True):
+        super().__init__()
+        self.base = timm.create_model(version, pretrained=pretrained,
+                                       num_classes=0, global_pool='avg')
+        # Unfreeze top layers
+        for name, p in self.base.named_parameters():
+            p.requires_grad = 'blocks.6' in name or 'bn2' in name or 'conv_head' in name
+
+        self.attention = nn.Sequential(
+            nn.Linear(self.base.num_features, self.base.num_features // 4),
+            nn.ReLU(),
+            nn.Linear(self.base.num_features // 4, self.base.num_features),
+            nn.Sigmoid()
+        )
+        self.head = nn.Sequential(
+            nn.Linear(self.base.num_features, 256),
+            nn.SiLU(), nn.Dropout(0.4),
+            nn.Linear(256, 64),
+            nn.SiLU(),
+            nn.Linear(64, 1)
+            # Removed nn.Sigmoid() as BCEWithLogitsLoss expects raw logits
+        )
+
+    def forward(self, x):
+        f = self.base(x)
+        f = f * self.attention(f)  # channel attention
+        # Removed .squeeze(1) as train_epoch will handle it
+        return self.head(f)
+
+
+efficientnet_model = EfficientNetDetector().to(CFG.DEVICE)
+dummy = torch.randn(2, 3, CFG.IMG_SIZE, CFG.IMG_SIZE).to(CFG.DEVICE)
+out = efficientnet_model(dummy)
+print(f'✅ EfficientNet-B4 output: {out.shape}')
+print(f'   Trainable: {sum(p.numel() for p in efficientnet_model.parameters() if p.requires_grad):,}')
+
+================================================================================
+CELL 29
+================================================================================
+import torch.nn as nn
+import torch.optim as optim
+import timm # Required for EfficientNetDetector
+
+# ─── EfficientNet-B4 ──────────────────────────────────
+# Paper: Tan & Le, 2019 — EfficientNet: Rethinking Model Scaling
+# DFDC winner backbone — compound scaling balances width/depth/resolution
+
+class EfficientNetDetector(nn.Module):
+    def __init__(self, version='efficientnet_b4', pretrained=True):
+        super().__init__()
+        self.base = timm.create_model(version, pretrained=pretrained,
+                                       num_classes=0, global_pool='avg')
+        # Unfreeze top layers
+        for name, p in self.base.named_parameters():
+            p.requires_grad = 'blocks.6' in name or 'bn2' in name or 'conv_head' in name
+
+        self.attention = nn.Sequential(
+            nn.Linear(self.base.num_features, self.base.num_features // 4),
+            nn.ReLU(),
+            nn.Linear(self.base.num_features // 4, self.base.num_features),
+            nn.Sigmoid()
+        )
+        self.head = nn.Sequential(
+            nn.Linear(self.base.num_features, 256),
+            nn.SiLU(), nn.Dropout(0.4),
+            nn.Linear(256, 64),
+            nn.SiLU(),
+            nn.Linear(64, 1)
+            # Removed nn.Sigmoid() as BCEWithLogitsLoss expects raw logits
+        )
+
+    def forward(self, x):
+        f = self.base(x)
+        f = f * self.attention(f)  # channel attention
+        # Removed .squeeze(1) as train_epoch will handle it
+        return self.head(f)
+
+efficientnet_model = EfficientNetDetector().to(CFG.DEVICE) # Added this line
+criterion_efficientnet = nn.BCEWithLogitsLoss()
+optimizer_efficientnet = optim.Adam(efficientnet_model.parameters(), lr=CFG.LR, weight_decay=CFG.WEIGHT_DECAY)
+
+history_efficientnet = train_model(
+    efficientnet_model, train_loader, val_loader, criterion_efficientnet,
+    optimizer_efficientnet, CFG.DEVICE, CFG.EPOCHS, 'EfficientNet'
+)
+print('\n✅ EfficientNet training complete.')
+
+================================================================================
+CELL 34
+================================================================================
+# ─── Frequency Domain Deepfake Detection ──────────────────────────────────────
+# Paper: Qian et al., 2020 — "Thinking in Frequency: Face Forgery Detection by Mining
+#        Frequency-aware Clues"
+# Key idea: GAN-generated images leave spectral artifacts invisible to human eye
+
+class FrequencyExtractor(nn.Module):
+    """Converts images to frequency domain features (FFT + DCT)."""
+    def forward(self, x):
+        # x: [B, C, H, W] float32
+        fft = self.fft_features(x)   # [B, C, H, W]
+        dct = self.dct_features(x)   # [B, C, H, W]
+        return torch.cat([fft, dct], dim=1)  # [B, 2C, H, W]
+
+    def fft_features(self, x):
+        """2D FFT magnitude spectrum per channel."""
+        # x: [B, C, H, W] float32
+        f = torch.fft.fft2(x)
+        f_shift = torch.fft.fftshift(f)
+        magnitude = torch.log1p(torch.abs(f_shift))  # log scale for better range
+        return magnitude  # [B, C, H, W]
+
+    def dct_features(self, x):
+        """Approximate DCT using cosine basis (channels concatenated)."""
+        # Simple approximation: high-freq energy in image patches
+        B, C, H, W = x.shape
+        # Split into 8x8 blocks (JPEG-like)
+        x_blocks = x.unfold(2, 8, 8).unfold(3, 8, 8)  # [B, C, H/8, W/8, 8, 8]
+        # Variance of each block (proxy for high-freq energy)
+        dct_proxy = x_blocks.var(dim=[-2, -1])  # [B, C, H/8, W/8]
+        return F.interpolate(dct_proxy, size=(H, W), mode='bilinear', align_corners=False)
+
+
+class FrequencyDetector(nn.Module):
+    """
+    Dual-stream frequency domain detector.
+    Stream 1: Spatial (RGB) → EfficientNet features
+    Stream 2: Frequency (FFT+DCT) → CNN features
+    Fusion: Concatenation + classifier
+    """
+    def __init__(self):
+        super().__init__()
+        self.freq_extractor = FrequencyExtractor()
+
+        # Frequency stream: process 6-channel (2C) frequency maps
+        self.freq_cnn = nn.Sequential(
+            nn.Conv2d(6, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(4),
+        )
+
+        # Spatial stream: lightweight MobileNetV2
+        self.spatial_cnn = timm.create_model('mobilenetv2_100', pretrained=True,
+                                              num_classes=0, global_pool='avg')
+
+        spatial_dim = self.spatial_cnn.num_features   # 1280
+        freq_dim    = 128 * 4 * 4                     # 2048
+
+        # Fusion
+        self.fusion = nn.Sequential(
+            nn.Linear(spatial_dim + freq_dim, 512),
+            nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(512, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # Frequency stream
+        freq_maps = self.freq_extractor(x)
+        freq_feat = self.freq_cnn(freq_maps).flatten(1)
+        # Spatial stream
+        sp_feat = self.spatial_cnn(x)
+        # Fusion
+        return self.fusion(torch.cat([sp_feat, freq_feat], dim=1))
+
+
+# Test with dummy input
+dummy = torch.randn(2, 3, CFG.IMG_SIZE, CFG.IMG_SIZE).to(CFG.DEVICE)
+freq_model = FrequencyDetector().to(CFG.DEVICE)
+out = freq_model(dummy)
+print(f'✅ FrequencyDetector output: {out.shape}')
+
+# Visualize FFT spectrum on a sample image
+sample_img = dummy[0].cpu().permute(1,2,0).numpy()
+gray = cv2.cvtColor(((sample_img * 0.225 + 0.485) * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+f = np.fft.fft2(gray)
+fshift = np.fft.fftshift(f)
+mag_spectrum = 20 * np.log(np.abs(fshift) + 1)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].imshow(gray, cmap='gray'); axes[0].set_title('Spatial Domain (Face)', fontsize=13)
+axes[1].imshow(mag_spectrum, cmap='inferno'); axes[1].set_title('FFT Magnitude Spectrum', fontsize=13)
+for ax in axes: ax.axis('off')
+plt.suptitle('Frequency Domain Analysis — Deepfake artifacts appear as spectral anomalies',
+             fontsize=11, color='gray')
+plt.tight_layout()
+plt.savefig('/content/fft_visualization.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+================================================================================
+CELL 40
+================================================================================
+# ─── Train all 4 image-based models ───────────────────────────────────────────
+# (CNN+LSTM requires video data — shown separately)
+
+# Redefine XceptionDetector to remove redundant squeeze(1) and final Sigmoid for BCEWithLogitsLoss compatibility
+class XceptionDetector(nn.Module):
+    def __init__(self, num_classes=1, pretrained=True):
+        super().__init__()
+        self.backbone = timm.create_model('xception', pretrained=pretrained, num_classes=0)
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(self.backbone.num_features, num_classes),
+            # nn.Sigmoid() # Removed for compatibility with nn.BCEWithLogitsLoss
+        )
+
+    def forward(self, x):
+        features = self.backbone(x)
+        # Removed .squeeze(1) here as Trainer._run_epoch will handle it
+        return self.classifier(features)
+
+models_to_train = {
+    'Meso4'         : Meso4(),
+    'MesoInception4': MesoInception4(),
+    'XceptionNet'   : XceptionDetector(pretrained=True),
+    'EfficientNetB4': EfficientNetDetector(),
+    'FrequencyNet'  : FrequencyDetector(),
+}
+
+all_histories = {}
+all_trainers  ={}
+
+for model_name, model in models_to_train.items():
+    print(f"\n{'='*30} Training {model_name} {'='*30}")
+    trainer = Trainer(model, model_name)
+    history = trainer.train(train_loader, val_loader, epochs=CFG.EPOCHS)
+    all_histories[model_name] = history
+    all_trainers[model_name]  = trainer
+    torch.cuda.empty_cache()
+
+print('\n✅ All models trained!')
+
